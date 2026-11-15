@@ -44,7 +44,7 @@ class PairingSession(
             message(20) {
                 message(1) {
                     varint(1, ENCODING_HEX)
-                    varint(2, 4)
+                    varint(2, 6)
                 }
                 varint(3, ROLE_INPUT)
             }
@@ -56,7 +56,7 @@ class PairingSession(
             message(30) {
                 message(1) {
                     varint(1, ENCODING_HEX)
-                    varint(2, 4)
+                    varint(2, 6)
                 }
                 varint(2, ROLE_INPUT)
             }
