@@ -1,67 +1,93 @@
 package com.aadil.tclremote.net
 
 import android.annotation.SuppressLint
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
+import android.content.Context
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
+import java.io.ByteArrayInputStream
+import java.io.File
 import java.math.BigInteger
 import java.net.InetSocketAddress
+import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.interfaces.RSAPublicKey
+import java.security.spec.PKCS8EncodedKeySpec
 import java.util.Date
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
-import javax.security.auth.x500.X500Principal
 
 /**
- * The phone's identity towards the TV: an RSA key + self-signed certificate that
- * lives in the Android Keystore. The TV remembers this certificate after pairing.
+ * The phone's identity towards the TV: an RSA key + self-signed certificate kept in
+ * the app's private storage. The TV remembers this certificate after pairing.
+ *
+ * The key lives in app storage rather than the Android Keystore because some phones
+ * can't use Keystore keys for TLS client signatures.
  */
 object ClientIdentity {
-    private const val ALIAS = "tcl_remote_client_v2"
     private const val DAY_MS = 24L * 60 * 60 * 1000
+    private val PASSWORD = "tcl-remote".toCharArray()
 
-    private fun keyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    private lateinit var keyFile: File
+    private lateinit var certFile: File
+    private var privateKey: PrivateKey? = null
+    private var certificate: X509Certificate? = null
 
-    private fun ensureKey() {
-        if (keyStore().containsAlias(ALIAS)) return
+    fun init(context: Context) {
+        keyFile = File(context.filesDir, "client_key.p8")
+        certFile = File(context.filesDir, "client_cert.der")
+    }
+
+    @Synchronized
+    private fun load() {
+        if (privateKey != null && certificate != null) return
+
+        if (keyFile.exists() && certFile.exists()) {
+            try {
+                val key = KeyFactory.getInstance("RSA")
+                    .generatePrivate(PKCS8EncodedKeySpec(keyFile.readBytes()))
+                val cert = CertificateFactory.getInstance("X.509")
+                    .generateCertificate(ByteArrayInputStream(certFile.readBytes())) as X509Certificate
+                privateKey = key
+                certificate = cert
+                return
+            } catch (e: Exception) {
+                keyFile.delete()
+                certFile.delete()
+            }
+        }
+
+        val pair = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
         val now = System.currentTimeMillis()
-        val spec = KeyGenParameterSpec.Builder(
-            ALIAS,
-            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY or
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        val name = X500Name("CN=tcl-remote")
+        val builder = JcaX509v3CertificateBuilder(
+            name,
+            BigInteger.valueOf(now),
+            Date(now - DAY_MS),
+            Date(now + 20L * 365 * DAY_MS),
+            name,
+            pair.public
         )
-            .setKeySize(2048)
-            .setDigests(
-                KeyProperties.DIGEST_NONE,
-                KeyProperties.DIGEST_SHA1,
-                KeyProperties.DIGEST_SHA256,
-                KeyProperties.DIGEST_SHA384,
-                KeyProperties.DIGEST_SHA512
-            )
-            .setSignaturePaddings(
-                KeyProperties.SIGNATURE_PADDING_RSA_PKCS1,
-                KeyProperties.SIGNATURE_PADDING_RSA_PSS
-            )
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
-            .setCertificateSubject(X500Principal("CN=tcl-remote"))
-            .setCertificateSerialNumber(BigInteger.valueOf(now))
-            .setCertificateNotBefore(Date(now - DAY_MS))
-            .setCertificateNotAfter(Date(now + 20L * 365 * DAY_MS))
-            .build()
-        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, "AndroidKeyStore")
-            .apply { initialize(spec) }
-            .generateKeyPair()
+        val signer = JcaContentSignerBuilder("SHA256withRSA").build(pair.private)
+        val cert = JcaX509CertificateConverter().getCertificate(builder.build(signer))
+
+        keyFile.writeBytes(pair.private.encoded)
+        certFile.writeBytes(cert.encoded)
+        privateKey = pair.private
+        certificate = cert
     }
 
     fun publicKey(): RSAPublicKey {
-        ensureKey()
-        val cert = keyStore().getCertificate(ALIAS) as X509Certificate
-        return cert.publicKey as RSAPublicKey
+        load()
+        return certificate!!.publicKey as RSAPublicKey
     }
 
     /**
@@ -73,9 +99,14 @@ object ClientIdentity {
      */
     @SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
     fun openSocket(host: String, port: Int): SSLSocket {
-        ensureKey()
+        load()
+        val store = KeyStore.getInstance(KeyStore.getDefaultType())
+        store.load(null, null)
+        store.setKeyEntry("client", privateKey, PASSWORD, arrayOf(certificate))
+
         val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-        kmf.init(keyStore(), null)
+        kmf.init(store, PASSWORD)
+
         val trustAll = object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
             override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
@@ -84,8 +115,6 @@ object ClientIdentity {
         val ctx = SSLContext.getInstance("TLS")
         ctx.init(kmf.keyManagers, arrayOf<TrustManager>(trustAll), null)
         val socket = ctx.socketFactory.createSocket() as SSLSocket
-        // The TV's remote service speaks TLS 1.2, which signs with plain PKCS#1.
-        socket.enabledProtocols = arrayOf("TLSv1.2")
         try {
             socket.connect(InetSocketAddress(host, port), 8_000)
             socket.soTimeout = 0

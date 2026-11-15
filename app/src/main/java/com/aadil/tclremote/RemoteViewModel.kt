@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.aadil.tclremote.net.ClientIdentity
 import com.aadil.tclremote.net.Link
 import com.aadil.tclremote.net.PairingSession
 import com.aadil.tclremote.net.RemoteClient
@@ -39,6 +40,7 @@ class RemoteViewModel(app: Application) : AndroidViewModel(app) {
     val ui: StateFlow<UiState> = _ui.asStateFlow()
 
     init {
+        ClientIdentity.init(app)
         viewModelScope.launch {
             client.link.collect { link ->
                 if (link == Link.Closed && _ui.value.phase == Phase.Remote) {
