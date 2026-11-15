@@ -22,7 +22,7 @@ import javax.security.auth.x500.X500Principal
  * lives in the Android Keystore. The TV remembers this certificate after pairing.
  */
 object ClientIdentity {
-    private const val ALIAS = "tcl_remote_client"
+    private const val ALIAS = "tcl_remote_client_v2"
     private const val DAY_MS = 24L * 60 * 60 * 1000
 
     private fun keyStore(): KeyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
@@ -43,7 +43,10 @@ object ClientIdentity {
                 KeyProperties.DIGEST_SHA384,
                 KeyProperties.DIGEST_SHA512
             )
-            .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+            .setSignaturePaddings(
+                KeyProperties.SIGNATURE_PADDING_RSA_PKCS1,
+                KeyProperties.SIGNATURE_PADDING_RSA_PSS
+            )
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
             .setCertificateSubject(X500Principal("CN=tcl-remote"))
             .setCertificateSerialNumber(BigInteger.valueOf(now))
@@ -81,6 +84,8 @@ object ClientIdentity {
         val ctx = SSLContext.getInstance("TLS")
         ctx.init(kmf.keyManagers, arrayOf<TrustManager>(trustAll), null)
         val socket = ctx.socketFactory.createSocket() as SSLSocket
+        // The TV's remote service speaks TLS 1.2, which signs with plain PKCS#1.
+        socket.enabledProtocols = arrayOf("TLSv1.2")
         try {
             socket.connect(InetSocketAddress(host, port), 8_000)
             socket.soTimeout = 0
